@@ -110,8 +110,8 @@ def get_users():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT login, subscription_active, created_at FROM users")
-    users = [{"login": row["login"], "subscription_active": row["subscription_active"], "created_at": row["created_at"]} for row in cursor.fetchall()]
+    cursor.execute("SELECT login, password_hash, subscription_active, created_at FROM users")
+    users = [{"login": row["login"], "password_hash": row["password_hash"], "subscription_active": row["subscription_active"], "created_at": row["created_at"]} for row in cursor.fetchall()]
     conn.close()
     return jsonify({"status": "success", "users": users})
 
