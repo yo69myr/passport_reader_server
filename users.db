@@ -1,6 +1,0 @@
-CREATE TABLE users (
-    login TEXT PRIMARY KEY,
-    password_hash TEXT NOT NULL,
-    subscription_active BOOLEAN NOT NULL,
-    device_id TEXT
-);
