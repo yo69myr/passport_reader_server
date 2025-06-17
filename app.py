@@ -2,15 +2,16 @@ from flask import Flask, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
 from datetime import datetime
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 def get_db():
     conn = sqlite3.connect("users.db")
     conn.row_factory = sqlite3.Row
     return conn
 
-# Ініціалізація бази даних
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
@@ -99,7 +100,7 @@ def auth():
         return jsonify({"status": "error", "message": "Підписка неактивна"})
     return jsonify({"status": "error", "message": "Невірний логін або пароль"})
 
-@app.route("/api/admin/users", methods=["GET"])
+@app.route("/api/admin/users", methods=["POST"])
 def get_users():
     data = request.get_json()
     login = data.get("login")
