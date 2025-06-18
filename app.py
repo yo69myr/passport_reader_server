@@ -20,6 +20,7 @@ def init_db():
             password TEXT NOT NULL,
             subscription_active BOOLEAN NOT NULL,
             device_id TEXT,
+            session_active BOOLEAN DEFAULT FALSE,
             created_at TEXT NOT NULL
         )
     """)
@@ -43,8 +44,8 @@ def register():
 
     created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
-        "INSERT INTO users (login, password, subscription_active, device_id, created_at) VALUES (%s, %s, %s, %s, %s)",
-        (login, password, False, None, created_at)
+        "INSERT INTO users (login, password, subscription_active, device_id, session_active, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
+        (login, password, False, None, False, created_at)
     )
     conn.commit()
     conn.close()
@@ -58,11 +59,13 @@ def login():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT login, password, subscription_active, created_at FROM users WHERE login = %s", (login,))
+    cursor.execute("SELECT login, password, subscription_active, created_at, session_active FROM users WHERE login = %s", (login,))
     user = cursor.fetchone()
     conn.close()
 
     if user and user[1] == password:
+        if user[4]:  # session_active
+            return jsonify({"status": "error", "message": "Сесія вже активна для цього користувача"})
         is_admin = login == "yokoko" and password == "anonanonNbHq1554o"
         return jsonify({
             "status": "success",
@@ -82,22 +85,46 @@ def auth():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT password, subscription_active, device_id FROM users WHERE login = %s", (login,))
+    cursor.execute("SELECT password, subscription_active, device_id, session_active FROM users WHERE login = %s", (login,))
     user = cursor.fetchone()
-    conn.close()
 
     if user and user[0] == password:
-        if user[1]:
+        if user[3]:  # session_active
+            conn.close()
+            return jsonify({"status": "error", "message": "Сесія вже активна для цього користувача"})
+        if user[1]:  # subscription_active
             if user[2] is None:
-                conn = get_db()
-                cursor = conn.cursor()
-                cursor.execute("UPDATE users SET device_id = %s WHERE login = %s", (device_id, login))
-                conn.commit()
-                conn.close()
+                cursor.execute("UPDATE users SET device_id = %s, session_active = TRUE WHERE login = %s", (device_id, login))
             elif user[2] != device_id:
+                conn.close()
                 return jsonify({"status": "error", "message": "Логін прив’язано до іншого пристрою"})
+            else:
+                cursor.execute("UPDATE users SET session_active = TRUE WHERE login = %s", (login,))
+            conn.commit()
+            conn.close()
             return jsonify({"status": "success", "subscription_active": True})
+        conn.close()
         return jsonify({"status": "error", "message": "Підписка неактивна"})
+    conn.close()
+    return jsonify({"status": "error", "message": "Невірний логін або пароль"})
+
+@app.route("/api/logout", methods=["POST"])
+def logout():
+    data = request.get_json()
+    login = data.get("login")
+    password = data.get("password")
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT password FROM users WHERE login = %s", (login,))
+    user = cursor.fetchone()
+
+    if user and user[0] == password:
+        cursor.execute("UPDATE users SET session_active = FALSE WHERE login = %s", (login,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success"})
+    conn.close()
     return jsonify({"status": "error", "message": "Невірний логін або пароль"})
 
 @app.route("/api/admin/users", methods=["POST"])
@@ -110,8 +137,8 @@ def get_users():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT login, password, subscription_active, created_at FROM users")
-    users = [{"login": row[0], "password": row[1], "subscription_active": row[2], "created_at": row[3]} for row in cursor.fetchall()]
+    cursor.execute("SELECT login, password, subscription_active, created_at, session_active FROM users")
+    users = [{"login": row[0], "password": row[1], "subscription_active": row[2], "created_at": row[3], "session_active": row[4]} for row in cursor.fetchall()]
     conn.close()
     return jsonify({"status": "success", "users": users})
 
