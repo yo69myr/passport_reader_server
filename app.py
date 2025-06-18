@@ -1,15 +1,14 @@
 from flask import Flask, request, jsonify
-from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3
-from datetime import datetime
 from flask_cors import CORS
+import psycopg2
+from datetime import datetime
+import os
 
 app = Flask(__name__)
 CORS(app)
 
 def get_db():
-    conn = sqlite3.connect("users.db")
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
     return conn
 
 def init_db():
@@ -18,7 +17,7 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             login TEXT PRIMARY KEY,
-            password_hash TEXT NOT NULL,
+            password TEXT NOT NULL,
             subscription_active BOOLEAN NOT NULL,
             device_id TEXT,
             created_at TEXT NOT NULL
@@ -37,15 +36,16 @@ def register():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT login FROM users WHERE login = ?", (login,))
+    cursor.execute("SELECT login FROM users WHERE login = %s", (login,))
     if cursor.fetchone():
         conn.close()
         return jsonify({"status": "error", "message": "Логін уже зайнятий"})
 
-    password_hash = generate_password_hash(password)
     created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("INSERT INTO users (login, password_hash, subscription_active, device_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                   (login, password_hash, False, None, created_at))
+    cursor.execute(
+        "INSERT INTO users (login, password, subscription_active, device_id, created_at) VALUES (%s, %s, %s, %s, %s)",
+        (login, password, False, None, created_at)
+    )
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
@@ -58,17 +58,17 @@ def login():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT login, password_hash, subscription_active, created_at FROM users WHERE login = ?", (login,))
+    cursor.execute("SELECT login, password, subscription_active, created_at FROM users WHERE login = %s", (login,))
     user = cursor.fetchone()
     conn.close()
 
-    if user and check_password_hash(user["password_hash"], password):
+    if user and user[1] == password:
         is_admin = login == "yokoko" and password == "anonanonNbHq1554o"
         return jsonify({
             "status": "success",
-            "login": user["login"],
-            "subscription_active": user["subscription_active"],
-            "created_at": user["created_at"],
+            "login": user[0],
+            "subscription_active": user[2],
+            "created_at": user[3],
             "is_admin": is_admin
         })
     return jsonify({"status": "error", "message": "Невірний логін або пароль"})
@@ -82,19 +82,19 @@ def auth():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT password_hash, subscription_active, device_id FROM users WHERE login = ?", (login,))
+    cursor.execute("SELECT password, subscription_active, device_id FROM users WHERE login = %s", (login,))
     user = cursor.fetchone()
     conn.close()
 
-    if user and check_password_hash(user["password_hash"], password):
-        if user["subscription_active"]:
-            if user["device_id"] is None:
+    if user and user[0] == password:
+        if user[1]:
+            if user[2] is None:
                 conn = get_db()
                 cursor = conn.cursor()
-                cursor.execute("UPDATE users SET device_id = ? WHERE login = ?", (device_id, login))
+                cursor.execute("UPDATE users SET device_id = %s WHERE login = %s", (device_id, login))
                 conn.commit()
                 conn.close()
-            elif user["device_id"] != device_id:
+            elif user[2] != device_id:
                 return jsonify({"status": "error", "message": "Логін прив’язано до іншого пристрою"})
             return jsonify({"status": "success", "subscription_active": True})
         return jsonify({"status": "error", "message": "Підписка неактивна"})
@@ -110,8 +110,8 @@ def get_users():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT login, password_hash, subscription_active, created_at FROM users")
-    users = [{"login": row["login"], "password_hash": row["password_hash"], "subscription_active": row["subscription_active"], "created_at": row["created_at"]} for row in cursor.fetchall()]
+    cursor.execute("SELECT login, password, subscription_active, created_at FROM users")
+    users = [{"login": row[0], "password": row[1], "subscription_active": row[2], "created_at": row[3]} for row in cursor.fetchall()]
     conn.close()
     return jsonify({"status": "success", "users": users})
 
@@ -128,7 +128,7 @@ def update_subscription():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET subscription_active = ? WHERE login = ?", (subscription_active, user_login))
+    cursor.execute("UPDATE users SET subscription_active = %s WHERE login = %s", (subscription_active, user_login))
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
