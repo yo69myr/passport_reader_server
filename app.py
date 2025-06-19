@@ -3,17 +3,17 @@ from flask_cors import CORS
 import psycopg2
 from datetime import datetime, timedelta
 import os
-import hashlib
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app)
 
-# Налаштування бази даних
+# Налаштування бази даних із змінної середовища
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
+        print("Підключення до бази даних успішне")
         return conn
     except Exception as e:
         print(f"Помилка підключення до бази даних: {e}")
@@ -22,6 +22,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     if not conn:
+        print("Не вдалося ініціалізувати базу даних: немає підключення")
         return
     try:
         cur = conn.cursor()
@@ -30,36 +31,26 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 login VARCHAR(50) UNIQUE NOT NULL,
                 password VARCHAR(100) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 subscription_end TIMESTAMP,
                 device_id VARCHAR(100),
-                session_active BOOLEAN DEFAULT FALSE,
-                is_admin BOOLEAN DEFAULT FALSE,
-                subscription_active BOOLEAN DEFAULT FALSE
+                session_active BOOLEAN DEFAULT FALSE
             );
         """)
-        # Створення адміна, якщо його немає
-        admin_login = os.environ.get('ADMIN_LOGIN', 'admin')
-        admin_password = os.environ.get('ADMIN_PASSWORD', 'admin123')
-        hashed_password = hashlib.sha256(admin_password.encode()).hexdigest()
-        
-        cur.execute("SELECT * FROM users WHERE login = %s", (admin_login,))
-        if not cur.fetchone():
-            cur.execute(
-                "INSERT INTO users (login, password, is_admin, subscription_active) VALUES (%s, %s, %s, %s)",
-                (admin_login, hashed_password, True, True)
-            )
-            conn.commit()
-            print("Адміністратора створено")
-        
+        # Додаємо тестового користувача
+        cur.execute("""
+            INSERT INTO users (login, password, subscription_end, device_id, session_active)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (login) DO NOTHING;
+        """, ('proba8', 'ahegao69', datetime.utcnow() + timedelta(days=365), None, False))
         conn.commit()
-        print("Таблиця users готова")
+        print("Таблиця users створена або вже існує, тестовий користувач доданий")
     except Exception as e:
         print(f"Помилка ініціалізації бази даних: {e}")
     finally:
         cur.close()
         conn.close()
 
+# Ініціалізація бази даних при запуску
 init_db()
 
 @app.route('/api/auth', methods=['POST'])
@@ -69,38 +60,34 @@ def authenticate():
     password = data.get('password')
     device_id = data.get('device_id')
 
-    if not all([login, password, device_id]):
+    if not login or not password or not device_id:
+        print(f"Помилка: відсутні необхідні поля - login: {login}, password: {password}, device_id: {device_id}")
         return jsonify({"status": "error", "message": "Відсутні необхідні поля"}), 400
 
     conn = get_db_connection()
     if not conn:
+        print("Помилка: не вдалося підключитися до бази даних")
         return jsonify({"status": "error", "message": "Помилка сервера"}), 500
 
     try:
         cur = conn.cursor()
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, hashed_password))
+        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, password))
         user = cur.fetchone()
 
         if not user:
+            print(f"Помилка: користувач з логіном {login} не знайдений або неправильний пароль")
             return jsonify({"status": "error", "message": "Неправильний логін або пароль"}), 401
 
-        user_data = {
-            "id": user[0],
-            "login": user[1],
-            "subscription_end": user[4],
-            "device_id": user[5],
-            "session_active": user[6],
-            "is_admin": user[7],
-            "subscription_active": user[8]
-        }
-
+        subscription_end = user[4]  # subscription_end
+        session_active = user[5]    # session_active
         current_time = datetime.utcnow()
-        if user_data["subscription_end"] and isinstance(user_data["subscription_end"], datetime):
-            if user_data["subscription_end"] < current_time:
-                return jsonify({"status": "error", "message": "Підписка закінчилася"}), 403
 
-        if user_data["session_active"]:
+        if subscription_end is None or subscription_end < current_time:
+            print(f"Помилка: підписка для {login} закінчилася")
+            return jsonify({"status": "error", "message": "Підписка закінчилася"}), 403
+
+        if session_active:
+            print(f"Помилка: сесія для {login} уже активна")
             return jsonify({"status": "error", "message": "Сесія вже активна на іншому пристрої"}), 403
 
         cur.execute(
@@ -108,14 +95,11 @@ def authenticate():
             (device_id, login)
         )
         conn.commit()
-        return jsonify({
-            "status": "success",
-            "subscription_active": True,
-            "is_admin": user_data["is_admin"]
-        })
+        print(f"Аутентифікація успішна для {login}")
+        return jsonify({"status": "success", "subscription_active": True})
     except Exception as e:
         print(f"Помилка аутентифікації: {e}")
-        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
+        return jsonify({"status": "error", "message": f"Помилка сервера: {str(e)}"}), 500
     finally:
         cur.close()
         conn.close()
@@ -126,100 +110,31 @@ def logout():
     login = data.get('login')
     password = data.get('password')
 
-    if not all([login, password]):
+    if not login or not password:
+        print(f"Помилка: відсутні необхідні поля для logout - login: {login}, password: {password}")
         return jsonify({"status": "error", "message": "Відсутні необхідні поля"}), 400
 
     conn = get_db_connection()
     if not conn:
+        print("Помилка: не вдалося підключитися до бази даних для logout")
         return jsonify({"status": "error", "message": "Помилка сервера"}), 500
 
     try:
         cur = conn.cursor()
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, hashed_password))
-        if not cur.fetchone():
+        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, password))
+        user = cur.fetchone()
+
+        if not user:
+            print(f"Помилка: користувач з логіном {login} не знайдений або неправильний пароль для logout")
             return jsonify({"status": "error", "message": "Неправильний логін або пароль"}), 401
 
         cur.execute("UPDATE users SET session_active = FALSE WHERE login = %s", (login,))
         conn.commit()
+        print(f"Сесія завершена для {login}")
         return jsonify({"status": "success", "message": "Сесія завершена"})
     except Exception as e:
         print(f"Помилка завершення сесії: {e}")
-        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
-    finally:
-        cur.close()
-        conn.close()
-
-@app.route('/api/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    login = data.get('login')
-    password = data.get('password')
-
-    if not all([login, password]):
-        return jsonify({"status": "error", "message": "Відсутні необхідні поля"}), 400
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
-
-    try:
-        cur = conn.cursor()
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        
-        # Перевірка, чи існує користувач
-        cur.execute("SELECT * FROM users WHERE login = %s", (login,))
-        if cur.fetchone():
-            return jsonify({"status": "error", "message": "Користувач з таким логіном вже існує"}), 400
-
-        # Створення нового користувача
-        subscription_end = datetime.utcnow() + timedelta(days=30)  # 30-денна пробна підписка
-        cur.execute(
-            "INSERT INTO users (login, password, subscription_end, subscription_active) VALUES (%s, %s, %s, %s)",
-            (login, hashed_password, subscription_end, True)
-        )
-        conn.commit()
-        return jsonify({"status": "success", "message": "Акаунт успішно створено"})
-    except Exception as e:
-        print(f"Помилка реєстрації: {e}")
-        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
-    finally:
-        cur.close()
-        conn.close()
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    login = data.get('login')
-    password = data.get('password')
-
-    if not all([login, password]):
-        return jsonify({"status": "error", "message": "Відсутні необхідні поля"}), 400
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
-
-    try:
-        cur = conn.cursor()
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, hashed_password))
-        user = cur.fetchone()
-
-        if not user:
-            return jsonify({"status": "error", "message": "Неправильний логін або пароль"}), 401
-
-        user_data = {
-            "status": "success",
-            "login": user[1],
-            "created_at": user[3].strftime("%Y-%m-%d %H:%M:%S") if user[3] else "",
-            "subscription_active": user[8],
-            "is_admin": user[7]
-        }
-        return jsonify(user_data)
-    except Exception as e:
-        print(f"Помилка входу: {e}")
-        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
+        return jsonify({"status": "error", "message": f"Помилка сервера: {str(e)}"}), 500
     finally:
         cur.close()
         conn.close()
