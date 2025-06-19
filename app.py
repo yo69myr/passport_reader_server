@@ -1,164 +1,125 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 app = Flask(__name__)
 CORS(app)
 
-def get_db():
-    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-    return conn
+# Налаштування бази даних із змінної середовища
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+def get_db_connection():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        print(f"Помилка підключення до бази даних: {e}")
+        return None
 
 def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            login TEXT PRIMARY KEY,
-            password TEXT NOT NULL,
-            subscription_active BOOLEAN NOT NULL,
-            device_id TEXT,
-            session_active BOOLEAN DEFAULT FALSE,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                login VARCHAR(50) UNIQUE NOT NULL,
+                password VARCHAR(100) NOT NULL,
+                subscription_end TIMESTAMP,
+                device_id VARCHAR(100),
+                session_active BOOLEAN DEFAULT FALSE
+            );
+        """)
+        conn.commit()
+        print("Таблиця users створена або вже існує")
+    except Exception as e:
+        print(f"Помилка ініціалізації бази даних: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
+# Ініціалізація бази даних при запуску
 init_db()
 
-@app.route("/api/register", methods=["POST"])
-def register():
+@app.route('/api/auth', methods=['POST'])
+def authenticate():
     data = request.get_json()
-    login = data.get("login")
-    password = data.get("password")
+    login = data.get('login')
+    password = data.get('password')
+    device_id = data.get('device_id')
 
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT login FROM users WHERE login = %s", (login,))
-    if cursor.fetchone():
+    if not login or not password or not device_id:
+        return jsonify({"status": "error", "message": "Відсутні необхідні поля"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, password))
+        user = cur.fetchone()
+
+        if not user:
+            return jsonify({"status": "error", "message": "Неправильний логін або пароль"}), 401
+
+        subscription_end = user[4]  # subscription_end
+        session_active = user[5]    # session_active
+        current_time = datetime.utcnow()
+
+        if subscription_end is None or subscription_end < current_time:
+            return jsonify({"status": "error", "message": "Підписка закінчилася"}), 403
+
+        if session_active:
+            return jsonify({"status": "error", "message": "Сесія вже активна на іншому пристрої"}), 403
+
+        cur.execute(
+            "UPDATE users SET device_id = %s, session_active = TRUE WHERE login = %s",
+            (device_id, login)
+        )
+        conn.commit()
+        return jsonify({"status": "success", "subscription_active": True})
+    except Exception as e:
+        print(f"Помилка аутентифікації: {e}")
+        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
+    finally:
+        cur.close()
         conn.close()
-        return jsonify({"status": "error", "message": "Логін уже зайнятий"})
 
-    created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute(
-        "INSERT INTO users (login, password, subscription_active, device_id, session_active, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
-        (login, password, False, None, False, created_at)
-    )
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success"})
-
-@app.route("/api/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    login = data.get("login")
-    password = data.get("password")
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT login, password, subscription_active, created_at, session_active FROM users WHERE login = %s", (login,))
-    user = cursor.fetchone()
-    conn.close()
-
-    if user and user[1] == password:
-        if user[4]:  # session_active
-            return jsonify({"status": "error", "message": "Сесія вже активна для цього користувача"})
-        is_admin = login == "yokoko" and password == "anonanonNbHq1554o"
-        return jsonify({
-            "status": "success",
-            "login": user[0],
-            "subscription_active": user[2],
-            "created_at": user[3],
-            "is_admin": is_admin
-        })
-    return jsonify({"status": "error", "message": "Невірний логін або пароль"})
-
-@app.route("/api/auth", methods=["POST"])
-def auth():
-    data = request.get_json()
-    login = data.get("login")
-    password = data.get("password")
-    device_id = data.get("device_id")
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT password, subscription_active, device_id, session_active FROM users WHERE login = %s", (login,))
-    user = cursor.fetchone()
-
-    if user and user[0] == password:
-        if user[3]:  # session_active
-            conn.close()
-            return jsonify({"status": "error", "message": "Сесія вже активна для цього користувача"})
-        if user[1]:  # subscription_active
-            if user[2] is None:
-                cursor.execute("UPDATE users SET device_id = %s, session_active = TRUE WHERE login = %s", (device_id, login))
-            elif user[2] != device_id:
-                conn.close()
-                return jsonify({"status": "error", "message": "Логін прив’язано до іншого пристрою"})
-            else:
-                cursor.execute("UPDATE users SET session_active = TRUE WHERE login = %s", (login,))
-            conn.commit()
-            conn.close()
-            return jsonify({"status": "success", "subscription_active": True})
-        conn.close()
-        return jsonify({"status": "error", "message": "Підписка неактивна"})
-    conn.close()
-    return jsonify({"status": "error", "message": "Невірний логін або пароль"})
-
-@app.route("/api/logout", methods=["POST"])
+@app.route('/api/logout', methods=['POST'])
 def logout():
     data = request.get_json()
-    login = data.get("login")
-    password = data.get("password")
+    login = data.get('login')
+    password = data.get('password')
 
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT password FROM users WHERE login = %s", (login,))
-    user = cursor.fetchone()
+    if not login or not password:
+        return jsonify({"status": "error", "message": "Відсутні необхідні поля"}), 400
 
-    if user and user[0] == password:
-        cursor.execute("UPDATE users SET session_active = FALSE WHERE login = %s", (login,))
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE login = %s AND password = %s", (login, password))
+        user = cur.fetchone()
+
+        if not user:
+            return jsonify({"status": "error", "message": "Неправильний логін або пароль"}), 401
+
+        cur.execute("UPDATE users SET session_active = FALSE WHERE login = %s", (login,))
         conn.commit()
+        return jsonify({"status": "success", "message": "Сесія завершена"})
+    except Exception as e:
+        print(f"Помилка завершення сесії: {e}")
+        return jsonify({"status": "error", "message": "Помилка сервера"}), 500
+    finally:
+        cur.close()
         conn.close()
-        return jsonify({"status": "success"})
-    conn.close()
-    return jsonify({"status": "error", "message": "Невірний логін або пароль"})
 
-@app.route("/api/admin/users", methods=["POST"])
-def get_users():
-    data = request.get_json()
-    login = data.get("login")
-    password = data.get("password")
-    if login != "yokoko" or password != "anonanonNbHq1554o":
-        return jsonify({"status": "error", "message": "Невірні адмін-дані"}), 401
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT login, password, subscription_active, created_at, session_active FROM users")
-    users = [{"login": row[0], "password": row[1], "subscription_active": row[2], "created_at": row[3], "session_active": row[4]} for row in cursor.fetchall()]
-    conn.close()
-    return jsonify({"status": "success", "users": users})
-
-@app.route("/api/admin/update_subscription", methods=["POST"])
-def update_subscription():
-    data = request.get_json()
-    login = data.get("login")
-    password = data.get("password")
-    if login != "yokoko" or password != "anonanonNbHq1554o":
-        return jsonify({"status": "error", "message": "Невірні адмін-дані"}), 401
-
-    user_login = data.get("user_login")
-    subscription_active = data.get("subscription_active")
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET subscription_active = %s WHERE login = %s", (subscription_active, user_login))
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success"})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
